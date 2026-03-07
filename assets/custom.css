@@ -1,0 +1,493 @@
+/* ══════════════════════════════════════════════════════
+   STOCK INTELLIGENCE — Premium Dark Theme
+   Luxury financial aesthetic: deep navy + gold + teal
+   ══════════════════════════════════════════════════════ */
+
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=DM+Mono:ital,wght@0,300;0,400;0,500;1,300&display=swap');
+
+:root {
+    --bg0: #03060f;
+    --bg1: #060d1a;
+    --bg2: #0a1628;
+    --bg3: #0e1e35;
+    --gold: #f5c842;
+    --teal: #00e5cc;
+    --green: #00d68f;
+    --red: #ff4d6d;
+    --border: rgba(255,255,255,0.06);
+    --border2: rgba(255,255,255,0.12);
+    --text: #f0f4ff;
+    --text2: #8899bb;
+    --text3: #4a5878;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; }
+
+body {
+    background: var(--bg1) !important;
+    color: var(--text) !important;
+    font-family: 'Outfit', sans-serif !important;
+    -webkit-font-smoothing: antialiased;
+}
+
+/* ── Scrollbar ─────────────────────────────── */
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: var(--bg0); }
+::-webkit-scrollbar-thumb { background: #1a2744; border-radius: 99px; }
+::-webkit-scrollbar-thumb:hover { background: #243554; }
+
+/* ── Plotly modebar ─────────────────────────── */
+.js-plotly-plot .plotly .modebar {
+    background: rgba(10,22,40,0.9) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: 8px !important;
+    backdrop-filter: blur(10px);
+}
+.js-plotly-plot .plotly .modebar-btn path { fill: var(--text3) !important; }
+.js-plotly-plot .plotly .modebar-btn:hover path { fill: var(--teal) !important; }
+.js-plotly-plot .plotly .modebar-btn.active path { fill: var(--gold) !important; }
+
+/* ── Period buttons ─────────────────────────── */
+.period-btn {
+    background: rgba(255,255,255,0.04) !important;
+    color: var(--text3) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: 7px !important;
+    padding: 5px 12px !important;
+    font-size: 11px !important;
+    font-family: 'DM Mono', monospace !important;
+    font-weight: 500 !important;
+    cursor: pointer !important;
+    transition: all 0.15s ease !important;
+    letter-spacing: 0.5px;
+}
+.period-btn:hover {
+    background: rgba(0,229,204,0.1) !important;
+    color: var(--teal) !important;
+    border-color: rgba(0,229,204,0.3) !important;
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(0,229,204,0.15) !important;
+}
+
+/* ── Dropdown ───────────────────────────────── */
+.Select-control {
+    background: var(--bg2) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: 8px !important;
+    color: var(--text) !important;
+    min-height: 36px !important;
+    transition: border-color 0.2s;
+}
+.Select-control:hover { border-color: rgba(0,229,204,0.35) !important; }
+.is-focused .Select-control {
+    border-color: var(--teal) !important;
+    box-shadow: 0 0 0 3px rgba(0,229,204,0.1) !important;
+}
+.Select-placeholder { color: var(--text3) !important; font-size: 12px !important; }
+.Select-value-label { color: var(--text2) !important; font-size: 12px !important; font-family: 'DM Mono', monospace !important; }
+.Select-input > input { color: var(--text) !important; font-family: 'DM Mono', monospace !important; font-size: 12px !important; }
+.Select-arrow-zone .Select-arrow { border-top-color: var(--text3) !important; }
+.Select-clear-zone { color: var(--text3) !important; }
+.Select-menu-outer {
+    background: var(--bg3) !important;
+    border: 1px solid var(--border2) !important;
+    border-radius: 10px !important;
+    box-shadow: 0 16px 48px rgba(0,0,0,0.7), 0 0 0 1px rgba(0,229,204,0.08) !important;
+    z-index: 9999 !important;
+    overflow: hidden;
+    margin-top: 4px !important;
+}
+.Select-option {
+    background: transparent !important;
+    color: var(--text2) !important;
+    font-size: 12px !important;
+    font-family: 'DM Mono', monospace !important;
+    padding: 9px 14px !important;
+    transition: all 0.1s;
+}
+.Select-option:hover, .Select-option.is-focused {
+    background: rgba(255,255,255,0.05) !important;
+    color: var(--text) !important;
+}
+.Select-option.is-selected {
+    background: rgba(0,229,204,0.1) !important;
+    color: var(--teal) !important;
+}
+/* Multi-value tags */
+.Select--multi .Select-value {
+    background: rgba(245,200,66,0.12) !important;
+    border: 1px solid rgba(245,200,66,0.25) !important;
+    border-radius: 6px !important;
+    color: var(--gold) !important;
+    font-size: 11px !important;
+    font-family: 'DM Mono', monospace !important;
+    margin: 2px 3px !important;
+}
+.Select--multi .Select-value-icon {
+    border-right: 1px solid rgba(245,200,66,0.2) !important;
+    color: var(--gold) !important;
+    padding: 2px 5px !important;
+}
+.Select--multi .Select-value-icon:hover {
+    background: rgba(255,77,109,0.15) !important;
+    color: var(--red) !important;
+}
+
+/* ── Date Picker ────────────────────────────── */
+.DateRangePickerInput {
+    background: var(--bg2) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: 8px !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    transition: border-color 0.2s;
+}
+.DateRangePickerInput:hover { border-color: rgba(0,229,204,0.35) !important; }
+.DateInput { background: transparent !important; }
+.DateInput_input {
+    background: transparent !important;
+    color: var(--text2) !important;
+    font-family: 'DM Mono', monospace !important;
+    font-size: 11px !important;
+    border: none !important;
+    padding: 6px 8px !important;
+    caret-color: var(--teal);
+}
+.DateInput_input::placeholder { color: var(--text3) !important; }
+.DateInput_input--focused { color: var(--text) !important; }
+.DateRangePickerInput_arrow { color: var(--text3) !important; }
+.DateRangePickerInput_calendarIcon svg { fill: var(--text3); }
+
+/* Calendar */
+.DayPicker {
+    background: var(--bg3) !important;
+    border: 1px solid var(--border2) !important;
+    border-radius: 12px !important;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.8) !important;
+    overflow: hidden;
+}
+.CalendarMonthGrid, .CalendarMonth { background: var(--bg3) !important; }
+.CalendarMonth_caption { color: var(--text) !important; font-family: 'Outfit', sans-serif !important; font-weight: 600 !important; }
+.DayPicker_weekHeader_li small { color: var(--text3) !important; font-family: 'DM Mono', monospace !important; font-size: 11px !important; }
+.CalendarDay__default {
+    background: transparent !important;
+    color: var(--text2) !important;
+    border: 1px solid rgba(255,255,255,0.03) !important;
+    transition: all 0.15s;
+}
+.CalendarDay__default:hover {
+    background: rgba(0,229,204,0.1) !important;
+    color: var(--teal) !important;
+    border-color: rgba(0,229,204,0.2) !important;
+}
+.CalendarDay__selected, .CalendarDay__selected:hover {
+    background: var(--gold) !important;
+    color: var(--bg0) !important;
+    border-color: var(--gold) !important;
+    font-weight: 700 !important;
+}
+.CalendarDay__selected_span {
+    background: rgba(245,200,66,0.15) !important;
+    color: var(--text) !important;
+    border-color: transparent !important;
+}
+.CalendarDay__hovered_span { background: rgba(245,200,66,0.1) !important; }
+.DayPickerNavigation_button {
+    background: rgba(255,255,255,0.05) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: 6px !important;
+    padding: 4px 8px !important;
+}
+.DayPickerNavigation_button:hover { background: rgba(255,255,255,0.1) !important; }
+.DayPickerNavigation_svg__horizontal { fill: var(--text2) !important; }
+.DayPickerKeyboardShortcuts_show__bottomRight { border-right-color: var(--teal) !important; }
+
+/* ── Animations ─────────────────────────────── */
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.3; }
+}
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+#page-content { animation: fadeIn 0.25s ease; }
+
+/* ── Dash tabs ──────────────────────────────── */
+.dash-tab {
+    background: var(--bg1) !important;
+    color: var(--text3) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: 8px 8px 0 0 !important;
+    font-family: 'Outfit', sans-serif !important;
+    font-size: 12px !important;
+    font-weight: 500 !important;
+}
+.dash-tab--selected {
+    background: var(--bg2) !important;
+    color: var(--teal) !important;
+    border-bottom-color: var(--bg2) !important;
+}
+
+/* ── Graph ──────────────────────────────────── */
+.dash-graph { border-radius: 8px; overflow: hidden; }
+
+/* Strong contrast for selected controls */
+.ctrl-dd .Select-control,
+.ctrl-dd .Select__control {
+    background: var(--bg3) !important;
+    border: 1px solid rgba(0,229,204,0.35) !important;
+    border-radius: 8px !important;
+    min-height: 38px !important;
+    box-shadow: none !important;
+}
+.ctrl-dd .Select-control:hover,
+.ctrl-dd .Select__control:hover {
+    border-color: rgba(245,200,66,0.55) !important;
+}
+.ctrl-dd.is-focused .Select-control,
+.ctrl-dd .is-focused .Select-control,
+.ctrl-dd .Select__control--is-focused {
+    border-color: var(--gold) !important;
+    box-shadow: 0 0 0 3px rgba(245,200,66,0.18) !important;
+}
+.ctrl-dd .Select-placeholder,
+.ctrl-dd .Select__placeholder {
+    color: var(--text2) !important;
+    opacity: 1 !important;
+}
+.ctrl-dd .Select-value-label,
+.ctrl-dd .Select__single-value {
+    color: var(--text) !important;
+    font-weight: 700 !important;
+    letter-spacing: 0.2px !important;
+}
+.ctrl-dd .Select-input > input,
+.ctrl-dd .Select__input input {
+    color: var(--text) !important;
+}
+.ctrl-dd .Select-arrow-zone .Select-arrow,
+.ctrl-dd .Select__indicator svg {
+    border-top-color: var(--text) !important;
+    fill: var(--text) !important;
+}
+.ctrl-dd .Select-menu-outer,
+.ctrl-dd .Select__menu {
+    background: var(--bg3) !important;
+    border: 1px solid rgba(0,229,204,0.3) !important;
+}
+.ctrl-dd .Select-option,
+.ctrl-dd .Select__option {
+    color: var(--text) !important;
+}
+.ctrl-dd .Select-option.is-selected,
+.ctrl-dd .Select__option--is-selected {
+    background: rgba(245,200,66,0.22) !important;
+    color: var(--gold) !important;
+    font-weight: 700 !important;
+}
+
+.ctrl-date .DateRangePickerInput,
+.ctrl-date .DateRangePickerInput__withBorder {
+    background: var(--bg3) !important;
+    border: 1px solid rgba(0,229,204,0.35) !important;
+    border-radius: 8px !important;
+}
+.ctrl-date .DateRangePickerInput:hover,
+.ctrl-date .DateRangePickerInput__withBorder:hover {
+    border-color: rgba(245,200,66,0.55) !important;
+}
+.ctrl-date .DateInput,
+.ctrl-date .DateInput__withCaret {
+    background: transparent !important;
+}
+.ctrl-date .DateInput_input {
+    background: transparent !important;
+    color: var(--text) !important;
+    font-size: 12px !important;
+    font-weight: 700 !important;
+}
+.ctrl-date .DateInput_input::placeholder {
+    color: var(--text2) !important;
+    opacity: 1 !important;
+}
+.ctrl-date .DateInput_input--focused,
+.ctrl-date .DateInput_input__focused {
+    color: var(--gold) !important;
+    background: rgba(245,200,66,0.1) !important;
+    border-radius: 6px !important;
+}
+.ctrl-date .DateRangePickerInput_arrow {
+    color: var(--text) !important;
+}
+.ctrl-date .DateRangePickerInput_calendarIcon svg,
+.ctrl-date .DateRangePickerInput_calendarIcon_svg {
+    fill: var(--text) !important;
+}
+
+/* ── Responsive ─────────────────────────────── */
+@media (max-width: 900px) {
+    .sidebar { display: none !important; }
+}
+
+/* Final override: very high contrast for top filters */
+#g-tickers .Select-control,
+#g-ctype .Select-control,
+#g-scale .Select-control,
+.ctrl-dd .Select-control {
+    background-color: #ffffff !important;
+    border: 2px solid #0ea5a5 !important;
+    border-radius: 8px !important;
+    box-shadow: none !important;
+}
+#g-tickers .Select-control:hover,
+#g-ctype .Select-control:hover,
+#g-scale .Select-control:hover,
+.ctrl-dd .Select-control:hover {
+    border-color: #f5c842 !important;
+}
+#g-tickers.is-focused .Select-control,
+#g-ctype.is-focused .Select-control,
+#g-scale.is-focused .Select-control,
+.ctrl-dd.is-focused .Select-control,
+.ctrl-dd .is-focused .Select-control {
+    border-color: #f5c842 !important;
+    box-shadow: 0 0 0 3px rgba(245,200,66,0.2) !important;
+}
+#g-tickers .Select-placeholder,
+#g-ctype .Select-placeholder,
+#g-scale .Select-placeholder,
+.ctrl-dd .Select-placeholder {
+    color: #334155 !important;
+    opacity: 1 !important;
+}
+#g-tickers .Select-value-label,
+#g-ctype .Select-value-label,
+#g-scale .Select-value-label,
+.ctrl-dd .Select-value-label,
+.ctrl-dd .Select-input > input {
+    color: #0f172a !important;
+    font-weight: 700 !important;
+}
+#g-tickers .Select-arrow-zone .Select-arrow,
+#g-ctype .Select-arrow-zone .Select-arrow,
+#g-scale .Select-arrow-zone .Select-arrow,
+.ctrl-dd .Select-arrow-zone .Select-arrow {
+    border-top-color: #0f172a !important;
+}
+.ctrl-dd .Select-menu-outer,
+#g-tickers .Select-menu-outer,
+#g-ctype .Select-menu-outer,
+#g-scale .Select-menu-outer {
+    background: #ffffff !important;
+    border: 1px solid #0ea5a5 !important;
+}
+.ctrl-dd .Select-option,
+#g-tickers .Select-option,
+#g-ctype .Select-option,
+#g-scale .Select-option {
+    color: #0f172a !important;
+}
+.ctrl-dd .Select-option.is-focused,
+#g-tickers .Select-option.is-focused,
+#g-ctype .Select-option.is-focused,
+#g-scale .Select-option.is-focused {
+    background: #ecfeff !important;
+    color: #0f172a !important;
+}
+.ctrl-dd .Select-option.is-selected,
+#g-tickers .Select-option.is-selected,
+#g-ctype .Select-option.is-selected,
+#g-scale .Select-option.is-selected {
+    background: #cffafe !important;
+    color: #0f172a !important;
+    font-weight: 700 !important;
+}
+.ctrl-dd .Select--multi .Select-value,
+#g-tickers .Select--multi .Select-value {
+    background: #dbeafe !important;
+    border: 1px solid #0284c7 !important;
+    color: #0f172a !important;
+}
+.ctrl-dd .Select--multi .Select-value-icon,
+#g-tickers .Select--multi .Select-value-icon {
+    color: #0f172a !important;
+    border-right: 1px solid #93c5fd !important;
+}
+
+#g-dates .DateRangePickerInput,
+#g-dates .DateRangePickerInput__withBorder,
+.ctrl-date .DateRangePickerInput,
+.ctrl-date .DateRangePickerInput__withBorder {
+    background: #ffffff !important;
+    border: 2px solid #0ea5a5 !important;
+    border-radius: 8px !important;
+}
+#g-dates .DateRangePickerInput:hover,
+.ctrl-date .DateRangePickerInput:hover {
+    border-color: #f5c842 !important;
+}
+#g-dates .DateInput_input,
+.ctrl-date .DateInput_input {
+    background: transparent !important;
+    color: #0f172a !important;
+    font-weight: 700 !important;
+    opacity: 1 !important;
+}
+#g-dates .DateInput_input::placeholder,
+.ctrl-date .DateInput_input::placeholder {
+    color: #334155 !important;
+    opacity: 1 !important;
+}
+#g-dates .DateRangePickerInput_arrow,
+.ctrl-date .DateRangePickerInput_arrow {
+    color: #0f172a !important;
+}
+
+/* Force black text in top white filter boxes */
+#g-tickers .Select *,
+#g-ctype .Select *,
+#g-scale .Select * {
+    color: #111827 !important;
+}
+#g-tickers .Select-placeholder,
+#g-ctype .Select-placeholder,
+#g-scale .Select-placeholder,
+#g-tickers .Select__placeholder,
+#g-ctype .Select__placeholder,
+#g-scale .Select__placeholder {
+    color: #111827 !important;
+    opacity: 1 !important;
+}
+#g-tickers .Select-value-label,
+#g-ctype .Select-value-label,
+#g-scale .Select-value-label,
+#g-tickers .Select__single-value,
+#g-ctype .Select__single-value,
+#g-scale .Select__single-value {
+    color: #111827 !important;
+}
+#g-tickers .Select-input > input,
+#g-ctype .Select-input > input,
+#g-scale .Select-input > input,
+#g-tickers .Select__input input,
+#g-ctype .Select__input input,
+#g-scale .Select__input input {
+    color: #111827 !important;
+}
+#g-dates input,
+#g-dates .DateInput_input,
+#g-dates .DateInput_input_1,
+#g-dates .DateRangePickerInput_arrow {
+    color: #111827 !important;
+    -webkit-text-fill-color: #111827 !important;
+}
+#g-dates input::placeholder,
+#g-dates .DateInput_input::placeholder,
+#g-dates .DateInput_input_1::placeholder {
+    color: #111827 !important;
+    opacity: 1 !important;
+}
+#g-dates svg {
+    fill: #111827 !important;
+}

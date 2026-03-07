@@ -1,0 +1,107 @@
+// ═══════════════════════════════════════════════════════════
+//  POWER BI DAX MEASURES — Copy-paste into Power BI Desktop
+//  Table: StockPrices | Snapshot: LatestSnapshot
+// ═══════════════════════════════════════════════════════════
+
+// ── BASIC PRICE MEASURES ──────────────────────────────────
+
+Latest Close =
+    CALCULATE(
+        MAX(StockPrices[Close]),
+        StockPrices[Date] = MAX(StockPrices[Date])
+    )
+
+Latest Daily Return % =
+    CALCULATE(
+        AVERAGE(LatestSnapshot[Daily_Return_%])
+    )
+
+Avg RSI =
+    AVERAGEX(StockPrices, StockPrices[RSI_14])
+
+// ── RETURN MEASURES ───────────────────────────────────────
+
+YTD Return % =
+    VAR startOfYear = DATE(YEAR(TODAY()), 1, 1)
+    VAR startPrice =
+        CALCULATE(
+            MIN(StockPrices[Close]),
+            StockPrices[Date] >= startOfYear
+        )
+    VAR endPrice = MAX(StockPrices[Close])
+    RETURN
+        DIVIDE(endPrice - startPrice, startPrice) * 100
+
+Best Performing Stock =
+    CALCULATE(
+        FIRSTNONBLANK(LatestSnapshot[Ticker], 1),
+        TOPN(1, LatestSnapshot, LatestSnapshot[Return_1Y_%], DESC)
+    )
+
+Worst Performing Stock =
+    CALCULATE(
+        FIRSTNONBLANK(LatestSnapshot[Ticker], 1),
+        TOPN(1, LatestSnapshot, LatestSnapshot[Return_1Y_%], ASC)
+    )
+
+// ── PORTFOLIO MEASURES ───────────────────────────────────
+
+Portfolio Avg 1Y Return % =
+    AVERAGE(LatestSnapshot[Return_1Y_%])
+
+Stocks Above SMA200 =
+    CALCULATE(
+        COUNTROWS(LatestSnapshot),
+        LatestSnapshot[Above_SMA200] = 1
+    )
+
+Stocks Below SMA200 =
+    CALCULATE(
+        COUNTROWS(LatestSnapshot),
+        LatestSnapshot[Above_SMA200] = 0
+    )
+
+Overbought Count =
+    CALCULATE(
+        COUNTROWS(LatestSnapshot),
+        LatestSnapshot[RSI_Signal] = "Overbought"
+    )
+
+Oversold Count =
+    CALCULATE(
+        COUNTROWS(LatestSnapshot),
+        LatestSnapshot[RSI_Signal] = "Oversold"
+    )
+
+// ── VOLATILITY MEASURES ───────────────────────────────────
+
+Avg Monthly Volatility % =
+    AVERAGE(StockPrices[Volatility_1M_%])
+
+High Volatility Days =
+    CALCULATE(
+        COUNTROWS(StockPrices),
+        StockPrices[Daily_Range_%] > 3
+    )
+
+// ── VOLUME MEASURES ───────────────────────────────────────
+
+High Volume Days Count =
+    CALCULATE(
+        COUNTROWS(StockPrices),
+        StockPrices[High_Volume_Day] = 1
+    )
+
+// ── DYNAMIC TITLE (for chart titles) ─────────────────────
+
+Selected Ticker Title =
+    IF(
+        HASONEVALUE(StockPrices[Ticker]),
+        MAX(StockPrices[Company]) & " (" & MAX(StockPrices[Ticker]) & ")",
+        "All Stocks"
+    )
+
+// ── LAST REFRESH ─────────────────────────────────────────
+
+Last Data Refresh =
+    MAX(LatestSnapshot[Date])
