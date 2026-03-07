@@ -5,7 +5,7 @@
   python dashboard.py -> http://localhost:8050
 ========================================================
 """
-import os, warnings, json
+import os, warnings, json, time
 warnings.filterwarnings("ignore")
 
 import pandas as pd
@@ -15,7 +15,12 @@ import plotly.express as px
 from plotly.subplots import make_subplots
 from dash import Dash, dcc, html, Input, Output, State, callback_context, no_update, MATCH
 import dash_bootstrap_components as dbc
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+
+try:
+    import yfinance as yf
+except Exception:
+    yf = None
 
 # ÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚Â
 #  DATA
@@ -55,6 +60,154 @@ DEFAULT_T = [
     t for t in ["RELIANCE.NS","TCS.NS","HDFCBANK.NS","ICICIBANK.NS","INFY.NS"]
     if t in TICKERS
 ][:5]
+
+IST = timezone(timedelta(hours=5, minutes=30))
+LIVE_CACHE_TTL_SECONDS = int(os.getenv("LIVE_CACHE_TTL_SECONDS", "60"))
+_LIVE_QUOTE_CACHE = {}
+
+def _to_float(value):
+    """Best-effort float conversion for external quote fields."""
+    try:
+        if value is None:
+            return None
+        if isinstance(value, float) and np.isnan(value):
+            return None
+        return float(value)
+    except Exception:
+        return None
+
+def _as_utc_timestamp(value):
+    if value is None:
+        return pd.NaT
+    try:
+        if isinstance(value, (int, float, np.integer, np.floating)):
+            if isinstance(value, float) and np.isnan(value):
+                return pd.NaT
+            v = float(value)
+            if v > 1e14:
+                return pd.to_datetime(v, unit="ns", utc=True, errors="coerce")
+            if v > 1e11:
+                return pd.to_datetime(v, unit="ms", utc=True, errors="coerce")
+            return pd.to_datetime(v, unit="s", utc=True, errors="coerce")
+        return pd.to_datetime(value, errors="coerce", utc=True)
+    except Exception:
+        return pd.NaT
+
+def _fast_info_get(fast_info, key):
+    try:
+        if isinstance(fast_info, dict):
+            return fast_info.get(key)
+        if hasattr(fast_info, "get"):
+            return fast_info.get(key)
+        return fast_info[key]
+    except Exception:
+        return None
+
+def _fetch_single_live_quote(ticker):
+    if yf is None:
+        return None
+
+    tk = yf.Ticker(ticker)
+    fast_info = {}
+    try:
+        fast_info = tk.fast_info or {}
+    except Exception:
+        fast_info = {}
+
+    price = _to_float(_fast_info_get(fast_info, "last_price"))
+    prev_close = _to_float(_fast_info_get(fast_info, "previous_close"))
+    volume = _to_float(_fast_info_get(fast_info, "last_volume"))
+    as_of = _as_utc_timestamp(_fast_info_get(fast_info, "last_price_time"))
+
+    # Fallback to recent daily candles when fast quote fields are missing.
+    if price is None or prev_close is None:
+        try:
+            hist = tk.history(period="5d", interval="1d", auto_adjust=False, timeout=8)
+        except TypeError:
+            # Older yfinance versions do not support timeout argument here.
+            hist = tk.history(period="5d", interval="1d", auto_adjust=False)
+        except Exception:
+            hist = pd.DataFrame()
+        if not hist.empty:
+            if price is None and "Close" in hist.columns:
+                price = _to_float(hist["Close"].iloc[-1])
+            if prev_close is None and "Close" in hist.columns:
+                if len(hist) > 1:
+                    prev_close = _to_float(hist["Close"].iloc[-2])
+                else:
+                    prev_close = _to_float(hist["Close"].iloc[-1])
+            if pd.isna(as_of):
+                as_of = _as_utc_timestamp(hist.index[-1])
+
+    if price is None:
+        return None
+
+    chg_pct = None
+    if prev_close and prev_close != 0:
+        chg_pct = ((price / prev_close) - 1) * 100
+
+    return {
+        "price": price,
+        "daily_change_pct": chg_pct,
+        "volume": volume,
+        "as_of": as_of if not pd.isna(as_of) else pd.NaT,
+    }
+
+def get_live_quotes(tickers):
+    now = time.time()
+    live = {}
+
+    for ticker in sorted({t for t in tickers if isinstance(t, str) and t.strip()}):
+        cached = _LIVE_QUOTE_CACHE.get(ticker)
+        if cached and now - cached["ts"] <= LIVE_CACHE_TTL_SECONDS:
+            live[ticker] = cached["quote"]
+            continue
+
+        quote = None
+        try:
+            quote = _fetch_single_live_quote(ticker)
+        except Exception:
+            quote = None
+
+        if quote is not None:
+            _LIVE_QUOTE_CACHE[ticker] = {"ts": now, "quote": quote}
+            live[ticker] = quote
+        elif cached:
+            live[ticker] = cached["quote"]
+
+    return live
+
+def with_live_quotes(snap_df):
+    if snap_df.empty:
+        return snap_df
+
+    out = snap_df.copy()
+    out["Price_Source"] = "EOD"
+    out["Price_As_Of"] = out.get("Date")
+    out["Price_As_Of"] = out["Price_As_Of"].astype("object")
+
+    live = get_live_quotes(out["Ticker"].dropna().astype(str).tolist())
+    if not live:
+        return out
+
+    for idx, row in out.iterrows():
+        quote = live.get(row.get("Ticker"))
+        if quote is None:
+            continue
+
+        out.at[idx, "Close"] = quote["price"]
+        if quote.get("daily_change_pct") is not None:
+            out.at[idx, "Daily_Return_%"] = quote["daily_change_pct"]
+        out.at[idx, "Price_Source"] = "LIVE"
+        out.at[idx, "Price_As_Of"] = quote.get("as_of")
+
+    return out
+
+def fmt_quote_timestamp(ts):
+    stamp = pd.to_datetime(ts, errors="coerce", utc=True)
+    if pd.isna(stamp):
+        return "Time unavailable"
+    return stamp.tz_convert(IST).strftime("%d %b %Y %I:%M %p IST")
 
 # ÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚Â
 #  DESIGN SYSTEM ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â Luxury Dark Financial Theme
@@ -320,7 +473,7 @@ NAV = [
 # ÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚Â
 app.layout = html.Div([
     dcc.Store(id="active-page", data="overview"),
-    dcc.Interval(id="clock", interval=300000, n_intervals=0),
+    dcc.Interval(id="clock", interval=60000, n_intervals=0),
 
     html.Div(style={
         "display": "flex", "minHeight": "100vh",
@@ -620,13 +773,15 @@ def heatmap_page_month_click(click_data, heatmap_id, start_date, end_date):
 @app.callback(Output("page-content","children"),
     Input("active-page","data"), Input("g-tickers","value"),
     Input("g-dates","start_date"), Input("g-dates","end_date"),
-    Input("g-ctype","value"), Input("g-scale","value"))
-def render(page, tickers, start, end, ctype, scale):
+    Input("g-ctype","value"), Input("g-scale","value"),
+    Input("clock","n_intervals"))
+def render(page, tickers, start, end, ctype, scale, _clock_tick):
     if not tickers: tickers = DEFAULT_T
     if isinstance(tickers, str): tickers = [tickers]
     s,e = pd.to_datetime(start), pd.to_datetime(end)
     df   = prices[(prices["Ticker"].isin(tickers))&(prices["Date"]>=s)&(prices["Date"]<=e)].copy()
     snap = snapshot[snapshot["Ticker"].isin(tickers)].copy()
+    snap = with_live_quotes(snap)
     fns  = {"overview":pg_overview,"price":pg_price,"technicals":pg_technicals,
             "compare":pg_compare,"sector":pg_sector,"risk":pg_risk,
             "screener":pg_screener,"heatmap":pg_heatmap}
@@ -644,9 +799,18 @@ def pg_overview(df, snap, tickers, ctype, scale):
         y1    = row.get("Return_1Y_%", 0) or 0
         rsi   = row.get("RSI_14", 50) or 50
         price = row.get("Close", 0) or 0
+        price_source = str(row.get("Price_Source", "EOD")).upper()
+        price_as_of = row.get("Price_As_Of", row.get("Date"))
         up    = chg >= 0
         rsi_c = RED if rsi>70 else (GREEN if rsi<30 else AMBER)
         spark_data = df[df["Ticker"]==row["Ticker"]]["Close"].tail(30).tolist()
+
+        if price_source == "LIVE":
+            price_stamp = f"LIVE | {fmt_quote_timestamp(price_as_of)}"
+        else:
+            eod_date = pd.to_datetime(row.get("Date"), errors="coerce")
+            eod_label = eod_date.strftime("%d %b %Y") if not pd.isna(eod_date) else "Date unavailable"
+            price_stamp = f"EOD CLOSE | {eod_label}"
 
         kpis.append(html.Div([
             # Glow border top
@@ -683,6 +847,11 @@ def pg_overview(df, snap, tickers, ctype, scale):
                 html.Div([html.Span("RSI  ",style={"color":TEXT3}), html.Span(f"{rsi:.0f}",style={"color":rsi_c,"fontWeight":"700","fontFamily":"'DM Mono',monospace"})]),
                 html.Div([html.Span("Vol  ",style={"color":TEXT3}), html.Span(f"{row.get('Volatility_1M_%',0) or 0:.1f}%",style={"color":AMBER,"fontFamily":"'DM Mono',monospace"})]),
             ]),
+            html.Div(price_stamp, style={
+                "marginTop":"10px","fontSize":"9px","letterSpacing":"0.4px",
+                "color": GREEN if price_source == "LIVE" else TEXT3,
+                "fontFamily":"'DM Mono',monospace",
+            }),
         ], style={
             "background": f"linear-gradient(135deg,{BG3} 0%,{BG2} 100%)",
             "border": f"1px solid {BORDER}",
