@@ -6,9 +6,8 @@
 ========================================================
 """
 import os, warnings, json, time
+from concurrent.futures import ThreadPoolExecutor, wait
 warnings.filterwarnings("ignore")
-from urllib.parse import quote as url_quote
-from urllib.request import Request, urlopen
 
 import pandas as pd
 import numpy as np
@@ -64,9 +63,13 @@ DEFAULT_T = [
 ][:5]
 
 IST = timezone(timedelta(hours=5, minutes=30))
+LIVE_CACHE_TTL_SECONDS = int(os.getenv("LIVE_CACHE_TTL_SECONDS", "10"))
 LIVE_REFRESH_INTERVAL_MS = int(os.getenv("LIVE_REFRESH_INTERVAL_MS", "10000"))
-LIVE_CACHE_TTL_SECONDS = int(os.getenv("LIVE_CACHE_TTL_SECONDS", "8"))
+LIVE_FETCH_TIMEOUT_SECONDS = float(os.getenv("LIVE_FETCH_TIMEOUT_SECONDS", "4.0"))
+LIVE_MAX_WORKERS = max(1, int(os.getenv("LIVE_MAX_WORKERS", "6")))
+LIVE_MAX_QUOTE_AGE_MINUTES = int(os.getenv("LIVE_MAX_QUOTE_AGE_MINUTES", "20"))
 _LIVE_QUOTE_CACHE = {}
+_META_REFRESH_CACHE = {"mtime": None, "component": ""}
 
 def _to_float(value):
     """Best-effort float conversion for external quote fields."""
@@ -106,51 +109,38 @@ def _fast_info_get(fast_info, key):
     except Exception:
         return None
 
-def _fetch_live_quotes_batch(tickers):
-    """Fetch live quotes in one Yahoo request for better serverless reliability."""
-    out = {}
-    valid = sorted({t for t in tickers if isinstance(t, str) and t.strip()})
-    if not valid:
-        return out
+def _is_recent_quote_timestamp(ts, max_age_minutes=LIVE_MAX_QUOTE_AGE_MINUTES):
+    stamp = _as_utc_timestamp(ts)
+    if pd.isna(stamp):
+        return False
+    now_utc = pd.Timestamp.now(tz="UTC")
+    if stamp > now_utc + pd.Timedelta(minutes=1):
+        return False
+    return (now_utc - stamp) <= pd.Timedelta(minutes=max_age_minutes)
 
-    # Keep URL size safe on larger universes.
-    chunk_size = 50
-    for i in range(0, len(valid), chunk_size):
-        chunk = valid[i:i + chunk_size]
-        symbols = ",".join(chunk)
-        url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={url_quote(symbols, safe=',')}"
-        req = Request(url, headers={"User-Agent": "Mozilla/5.0"})
-
+def _fetch_intraday_history(tk):
+    try:
+        return tk.history(period="1d", interval="1m", auto_adjust=False, prepost=False, timeout=8)
+    except TypeError:
         try:
-            with urlopen(req, timeout=8) as resp:
-                payload = json.loads(resp.read().decode("utf-8"))
+            return tk.history(period="1d", interval="1m", auto_adjust=False, prepost=False)
+        except TypeError:
+            return tk.history(period="1d", interval="1m", auto_adjust=False)
         except Exception:
-            continue
+            return pd.DataFrame()
+    except Exception:
+        return pd.DataFrame()
 
-        rows = (payload.get("quoteResponse") or {}).get("result") or []
-        for item in rows:
-            ticker = item.get("symbol")
-            if not ticker:
-                continue
-            price = _to_float(item.get("regularMarketPrice"))
-            if price is None:
-                continue
-
-            prev_close = _to_float(item.get("regularMarketPreviousClose"))
-            volume = _to_float(item.get("regularMarketVolume"))
-            as_of = _as_utc_timestamp(item.get("regularMarketTime"))
-            chg_pct = None
-            if prev_close and prev_close != 0:
-                chg_pct = ((price / prev_close) - 1) * 100
-
-            out[ticker] = {
-                "price": price,
-                "daily_change_pct": chg_pct,
-                "volume": volume,
-                "as_of": as_of if not pd.isna(as_of) else pd.NaT,
-            }
-
-    return out
+def _fetch_daily_history(tk):
+    try:
+        return tk.history(period="5d", interval="1d", auto_adjust=False, timeout=8)
+    except TypeError:
+        try:
+            return tk.history(period="5d", interval="1d", auto_adjust=False)
+        except Exception:
+            return pd.DataFrame()
+    except Exception:
+        return pd.DataFrame()
 
 def _fetch_single_live_quote(ticker):
     if yf is None:
@@ -167,26 +157,37 @@ def _fetch_single_live_quote(ticker):
     prev_close = _to_float(_fast_info_get(fast_info, "previous_close"))
     volume = _to_float(_fast_info_get(fast_info, "last_volume"))
     as_of = _as_utc_timestamp(_fast_info_get(fast_info, "last_price_time"))
+    source = None
 
-    # Fallback to recent daily candles when fast quote fields are missing.
-    if price is None or prev_close is None:
-        try:
-            hist = tk.history(period="5d", interval="1d", auto_adjust=False, timeout=8)
-        except TypeError:
-            # Older yfinance versions do not support timeout argument here.
-            hist = tk.history(period="5d", interval="1d", auto_adjust=False)
-        except Exception:
-            hist = pd.DataFrame()
-        if not hist.empty:
-            if price is None and "Close" in hist.columns:
-                price = _to_float(hist["Close"].iloc[-1])
-            if prev_close is None and "Close" in hist.columns:
-                if len(hist) > 1:
-                    prev_close = _to_float(hist["Close"].iloc[-2])
-                else:
-                    prev_close = _to_float(hist["Close"].iloc[-1])
-            if pd.isna(as_of):
-                as_of = _as_utc_timestamp(hist.index[-1])
+    if price is not None and _is_recent_quote_timestamp(as_of):
+        source = "FAST"
+
+    # Fallback to 1-minute intraday candles when fast quote fields are missing/stale.
+    if source is None:
+        intraday = _fetch_intraday_history(tk)
+        if not intraday.empty and "Close" in intraday.columns:
+            intraday = intraday.dropna(subset=["Close"])
+        if not intraday.empty:
+            price = _to_float(intraday["Close"].iloc[-1])
+            as_of = _as_utc_timestamp(intraday.index[-1])
+            if "Volume" in intraday.columns:
+                volume = _to_float(intraday["Volume"].fillna(0).sum())
+            source = "INTRADAY"
+
+    daily = pd.DataFrame()
+    if price is None or prev_close is None or source == "INTRADAY":
+        daily = _fetch_daily_history(tk)
+
+    if prev_close is None and not daily.empty and "Close" in daily.columns:
+        if len(daily) > 1:
+            prev_close = _to_float(daily["Close"].iloc[-2])
+        else:
+            prev_close = _to_float(daily["Close"].iloc[-1])
+
+    if price is None and not daily.empty and "Close" in daily.columns:
+        price = _to_float(daily["Close"].iloc[-1])
+        as_of = _as_utc_timestamp(daily.index[-1])
+        source = "DAILY_FALLBACK"
 
     if price is None:
         return None
@@ -195,47 +196,80 @@ def _fetch_single_live_quote(ticker):
     if prev_close and prev_close != 0:
         chg_pct = ((price / prev_close) - 1) * 100
 
+    is_live = source in {"FAST", "INTRADAY"} and _is_recent_quote_timestamp(as_of)
+    if not is_live and source not in {"DAILY_FALLBACK"} and not daily.empty and "Close" in daily.columns:
+        # If intraday quote is stale, downgrade to daily close to avoid misleading LIVE labels.
+        price = _to_float(daily["Close"].iloc[-1]) or price
+        as_of = _as_utc_timestamp(daily.index[-1])
+        source = "DAILY_FALLBACK"
+        if len(daily) > 1:
+            prev_close = _to_float(daily["Close"].iloc[-2])
+        elif len(daily) == 1:
+            prev_close = _to_float(daily["Close"].iloc[-1])
+        if prev_close and prev_close != 0:
+            chg_pct = ((price / prev_close) - 1) * 100
+
     return {
         "price": price,
         "daily_change_pct": chg_pct,
         "volume": volume,
         "as_of": as_of if not pd.isna(as_of) else pd.NaT,
+        "source": source or "UNKNOWN",
+        "is_live": source in {"FAST", "INTRADAY"} and _is_recent_quote_timestamp(as_of),
     }
 
 def get_live_quotes(tickers):
     now = time.time()
     live = {}
-    valid_tickers = sorted({t for t in tickers if isinstance(t, str) and t.strip()})
-    to_refresh = []
+    stale_tickers = []
+    normalized_tickers = sorted({t for t in tickers if isinstance(t, str) and t.strip()})
 
-    for ticker in valid_tickers:
+    for ticker in normalized_tickers:
         cached = _LIVE_QUOTE_CACHE.get(ticker)
         if cached and now - cached["ts"] <= LIVE_CACHE_TTL_SECONDS:
             live[ticker] = cached["quote"]
-            continue
-        to_refresh.append(ticker)
+        else:
+            stale_tickers.append(ticker)
 
-    # Primary path: single batch request (faster and more stable on Vercel).
-    batched = _fetch_live_quotes_batch(to_refresh)
+    if not stale_tickers:
+        return live
 
-    for ticker in to_refresh:
-        quote = batched.get(ticker)
+    if yf is None:
+        for ticker in stale_tickers:
+            cached = _LIVE_QUOTE_CACHE.get(ticker)
+            if cached:
+                live[ticker] = cached["quote"]
+        return live
 
-        # Fallback path: yfinance single ticker call.
-        if quote is None:
+    workers = min(LIVE_MAX_WORKERS, len(stale_tickers))
+    executor = ThreadPoolExecutor(max_workers=max(1, workers))
+    futures = {executor.submit(_fetch_single_live_quote, ticker): ticker for ticker in stale_tickers}
+    not_done = set()
+    try:
+        done, not_done = wait(futures, timeout=LIVE_FETCH_TIMEOUT_SECONDS)
+        for future in done:
+            ticker = futures[future]
+            quote = None
             try:
-                quote = _fetch_single_live_quote(ticker)
+                quote = future.result()
             except Exception:
                 quote = None
 
-        if quote is not None:
-            _LIVE_QUOTE_CACHE[ticker] = {"ts": now, "quote": quote}
-            live[ticker] = quote
-            continue
-
-        cached = _LIVE_QUOTE_CACHE.get(ticker)
-        if cached:
-            live[ticker] = cached["quote"]
+            if quote is not None:
+                _LIVE_QUOTE_CACHE[ticker] = {"ts": now, "quote": quote}
+                live[ticker] = quote
+            else:
+                cached = _LIVE_QUOTE_CACHE.get(ticker)
+                if cached:
+                    live[ticker] = cached["quote"]
+    finally:
+        for future in not_done:
+            future.cancel()
+            ticker = futures[future]
+            cached = _LIVE_QUOTE_CACHE.get(ticker)
+            if cached and ticker not in live:
+                live[ticker] = cached["quote"]
+        executor.shutdown(wait=False, cancel_futures=True)
 
     return live
 
@@ -257,11 +291,15 @@ def with_live_quotes(snap_df):
         if quote is None:
             continue
 
-        out.at[idx, "Close"] = quote["price"]
+        quote_price = _to_float(quote.get("price"))
+        if quote_price is None:
+            continue
+        out.at[idx, "Close"] = quote_price
         if quote.get("daily_change_pct") is not None:
             out.at[idx, "Daily_Return_%"] = quote["daily_change_pct"]
-        out.at[idx, "Price_Source"] = "LIVE"
-        out.at[idx, "Price_As_Of"] = quote.get("as_of")
+        out.at[idx, "Price_Source"] = "LIVE" if bool(quote.get("is_live")) else "EOD"
+        if quote.get("as_of") is not None and not pd.isna(_as_utc_timestamp(quote.get("as_of"))):
+            out.at[idx, "Price_As_Of"] = quote.get("as_of")
 
     return out
 
@@ -552,7 +590,8 @@ NAV = [
 # ÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚Â
 app.layout = html.Div([
     dcc.Store(id="active-page", data="overview"),
-    dcc.Interval(id="clock", interval=LIVE_REFRESH_INTERVAL_MS, n_intervals=0),
+    dcc.Interval(id="clock", interval=60000, n_intervals=0),
+    dcc.Interval(id="live-refresh", interval=LIVE_REFRESH_INTERVAL_MS, n_intervals=0),
 
     html.Div(style={
         "display": "flex", "minHeight": "100vh",
@@ -754,48 +793,63 @@ def set_page(*args):
     if not ctx.triggered: return "overview"
     return ctx.triggered[0]["prop_id"].split(".")[0].replace("nav-","")
 
-for page, _, name, icon in NAV:
-    @app.callback(Output(f"nav-{page}","style"), Input("active-page","data"))
-    def nav_style(active, p=page):
-        on = active == p
-        return {
-            "padding": "11px 16px", "cursor": "pointer",
-            "borderRadius": "10px", "margin": "2px 0",
-            "display": "flex", "alignItems": "center",
-            "transition": "all 0.2s ease",
-            "background": f"linear-gradient(90deg,{GOLD}15,{GOLD}05)" if on else "transparent",
-            "color": GOLD if on else TEXT3,
-            "borderLeft": f"2px solid {GOLD}" if on else "2px solid transparent",
-            "fontWeight": "600" if on else "400",
-        }
+def _nav_item_style(is_active):
+    return {
+        "padding": "11px 16px", "cursor": "pointer",
+        "borderRadius": "10px", "margin": "2px 0",
+        "display": "flex", "alignItems": "center",
+        "transition": "all 0.2s ease",
+        "background": f"linear-gradient(90deg,{GOLD}15,{GOLD}05)" if is_active else "transparent",
+        "color": GOLD if is_active else TEXT3,
+        "borderLeft": f"2px solid {GOLD}" if is_active else "2px solid transparent",
+        "fontWeight": "600" if is_active else "400",
+    }
 
-@app.callback(Output("page-title","children"), Input("active-page","data"))
-def page_title(active):
+@app.callback(
+    Output("page-title","children"),
+    Output("screener-sort-controls","style"),
+    Output("live-refresh","disabled"),
+    *[Output(f"nav-{p}", "style") for p,_,__,___ in NAV],
+    Input("active-page","data")
+)
+def update_page_ui(active):
+    title = ""
     for p,_,name,icon in NAV:
-        if p == active: return f"{icon}  {name}"
-    return ""
+        if p == active:
+            title = f"{icon}  {name}"
+            break
+    screener_style = {"display":"block"} if active == "screener" else {"display":"none"}
+    live_disabled = active != "overview"
+    nav_styles = [_nav_item_style(active == p) for p,_,__,___ in NAV]
+    return title, screener_style, live_disabled, *nav_styles
 
-@app.callback(Output("screener-sort-controls","style"), Input("active-page","data"))
-def show_screener_sort_controls(active):
-    if active == "screener":
-        return {"display":"block"}
-    return {"display":"none"}
-
-@app.callback(Output("live-time","children"), Input("clock","n_intervals"))
-def update_time(_):
-    return datetime.now(IST).strftime("%d %b %Y | %H:%M IST")
-
-@app.callback(Output("data-meta","children"), Input("clock","n_intervals"))
-def update_meta(_):
+def _data_meta_component():
+    meta_path = os.path.join(BASE, "meta_refresh.csv")
     try:
-        m = pd.read_csv(os.path.join(BASE,"meta_refresh.csv")).iloc[0]
-        return html.Div([
+        mtime = os.path.getmtime(meta_path)
+        if _META_REFRESH_CACHE["component"] and _META_REFRESH_CACHE["mtime"] == mtime:
+            return _META_REFRESH_CACHE["component"]
+
+        m = pd.read_csv(meta_path).iloc[0]
+        component = html.Div([
             html.Div(f"Stocks: {int(m['Stocks_Count'])}", style={"fontSize":"11px","color":TEXT3}),
             html.Div(f"Records: {int(m['Total_Rows']):,}", style={"fontSize":"11px","color":TEXT3}),
             html.Div("Updated:", style={"fontSize":"10px","color":TEXT3,"marginTop":"4px"}),
             html.Div(str(m['Last_Refresh'])[:16], style={"fontSize":"10px","color":GREEN,"fontFamily":"'DM Mono',monospace"}),
         ])
-    except: return ""
+        _META_REFRESH_CACHE["mtime"] = mtime
+        _META_REFRESH_CACHE["component"] = component
+        return component
+    except:
+        return ""
+
+@app.callback(
+    Output("live-time","children"),
+    Output("data-meta","children"),
+    Input("clock","n_intervals")
+)
+def update_header(_):
+    return datetime.now(IST).strftime("%d %b %Y | %H:%M IST"), _data_meta_component()
 
 @app.callback(Output("g-dates","start_date"),
     [Input(f"btn-{p}","n_clicks") for p in ["1W","1M","3M","6M","1Y","3Y","5Y","10Y","MAX"]],
@@ -890,12 +944,10 @@ def heatmap_page_month_click(click_data, heatmap_id, start_date, end_date):
     Input("g-dates","start_date"), Input("g-dates","end_date"),
     Input("g-ctype","value"), Input("g-scale","value"),
     Input("screener-sort-by","value"), Input("screener-sort-order","value"),
-    Input("clock","n_intervals"))
-def render(page, tickers, start, end, ctype, scale, screener_sort_by, screener_sort_order, _clock_tick):
-    ctx = callback_context
-    trig = ctx.triggered[0]["prop_id"].split(".")[0] if ctx.triggered else None
-    # Avoid expensive re-renders every 10s on non-live pages.
-    if trig == "clock" and page not in {"overview", "screener"}:
+    Input("live-refresh","n_intervals"))
+def render(page, tickers, start, end, ctype, scale, screener_sort_by, screener_sort_order, _live_tick):
+    trigger = callback_context.triggered[0]["prop_id"].split(".")[0] if callback_context.triggered else None
+    if trigger == "live-refresh" and page != "overview":
         return no_update
 
     if not tickers: tickers = DEFAULT_T
@@ -906,7 +958,7 @@ def render(page, tickers, start, end, ctype, scale, screener_sort_by, screener_s
     if page == "overview":
         snap = with_live_quotes(snap)
     if page == "screener":
-        return pg_screener(df, with_live_quotes(snapshot.copy()), tickers, ctype, scale, screener_sort_by, screener_sort_order)
+        return pg_screener(df, snap, tickers, ctype, scale, screener_sort_by, screener_sort_order)
     fns  = {"overview":pg_overview,"price":pg_price,"technicals":pg_technicals,
             "compare":pg_compare,"sector":pg_sector,"risk":pg_risk,
             "heatmap":pg_heatmap}
@@ -933,7 +985,9 @@ def pg_overview(df, snap, tickers, ctype, scale):
         if price_source == "LIVE":
             price_stamp = f"LIVE | {fmt_quote_timestamp(price_as_of)}"
         else:
-            eod_date = pd.to_datetime(row.get("Date"), errors="coerce")
+            eod_date = pd.to_datetime(price_as_of, errors="coerce")
+            if pd.isna(eod_date):
+                eod_date = pd.to_datetime(row.get("Date"), errors="coerce")
             eod_label = eod_date.strftime("%d %b %Y") if not pd.isna(eod_date) else "Date unavailable"
             price_stamp = f"EOD CLOSE | {eod_label}"
 
@@ -1552,7 +1606,7 @@ def pg_risk(df, snap, tickers, ctype, scale):
 #  PAGE 7 ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â SCREENER
 # ÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚Â
 def pg_screener(df, snap, tickers, ctype, scale, sort_by="Ticker", sort_order="asc"):
-    all_s = snap.copy()
+    all_s = snapshot.copy()
     all_s["Close_INR"] = all_s["Close"]
 
     def fmt_cell(col, val):
@@ -1684,9 +1738,18 @@ def pg_heatmap(df, snap, tickers, ctype, scale):
                 xaxis=dict(gridcolor="rgba(0,0,0,0)", color=TEXT3, side="top"),
                 yaxis=dict(gridcolor=DIM, color=TEXT3, autorange="reversed")))
 
-            latest_dt = sub["Date"].max()
-            init_wave, init_caption = build_month_wave_figure(sub, t, int(latest_dt.year), int(latest_dt.month))
-            init_table = build_month_daily_table_figure(sub, t, int(latest_dt.year), int(latest_dt.month))
+            init_wave = go.Figure()
+            init_wave.update_layout(**gl(height=320, title="",
+                xaxis=dict(gridcolor=DIM, color=TEXT3),
+                yaxis=dict(gridcolor=DIM, color=TEXT3)))
+            init_wave.add_annotation(text="Click a month cell to load detailed wave trend", showarrow=False,
+                font=dict(color=TEXT3, size=11))
+            init_caption = f"{t} | Click a month cell to load daily trend"
+
+            init_table = go.Figure()
+            init_table.update_layout(**gl(height=260, title=""))
+            init_table.add_annotation(text="Click a month cell to load daily rows", showarrow=False,
+                font=dict(color=TEXT3, size=11))
 
         figs.append(card([
             html.Div(f"{t} - Monthly Return Heatmap", style={"fontSize":"14px","fontWeight":"600","color":TEXT,"marginBottom":"10px"}),

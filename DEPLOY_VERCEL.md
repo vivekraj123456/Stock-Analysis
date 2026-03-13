@@ -26,6 +26,17 @@ After deploy finishes, open the Vercel URL and confirm the dashboard loads.
 - The app reads CSV files from `powerbi_data/` at runtime. Keep this folder in the repo.
 - Current dataset size is about 50 MB, which can increase cold start time on serverless.
 - If build fails due missing package, add it to `requirements.txt` and redeploy.
+- Vercel Python functions are serverless, so persistent WebSocket-style connections are not reliable for this Dash setup. The dashboard uses short polling for live quote updates.
+
+## Live Refresh Tuning (Optional)
+
+Set these environment variables in Vercel Project Settings -> Environment Variables:
+
+- `LIVE_REFRESH_INTERVAL_MS` (default `10000`): how often the UI asks for live updates.
+- `LIVE_CACHE_TTL_SECONDS` (default `10`): quote cache TTL on server side.
+- `LIVE_FETCH_TIMEOUT_SECONDS` (default `4.0`): max wait for live quote fetch batch.
+- `LIVE_MAX_WORKERS` (default `6`): parallel workers for live quote requests.
+- `LIVE_MAX_QUOTE_AGE_MINUTES` (default `20`): if quote timestamp is older than this, it is treated as EOD (not LIVE).
 
 ## Auto-Refresh On Vercel (Recommended)
 

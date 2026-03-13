@@ -1,5 +1,10 @@
 {
   "version": 2,
+  "env": {
+    "LIVE_REFRESH_INTERVAL_MS": "10000",
+    "LIVE_CACHE_TTL_SECONDS": "10",
+    "LIVE_MAX_QUOTE_AGE_MINUTES": "20"
+  },
   "builds": [
     {
       "src": "api/index.py",
