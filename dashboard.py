@@ -7,6 +7,8 @@
 """
 import os, warnings, json, time
 warnings.filterwarnings("ignore")
+from urllib.parse import quote as url_quote
+from urllib.request import Request, urlopen
 
 import pandas as pd
 import numpy as np
@@ -62,7 +64,8 @@ DEFAULT_T = [
 ][:5]
 
 IST = timezone(timedelta(hours=5, minutes=30))
-LIVE_CACHE_TTL_SECONDS = int(os.getenv("LIVE_CACHE_TTL_SECONDS", "60"))
+LIVE_REFRESH_INTERVAL_MS = int(os.getenv("LIVE_REFRESH_INTERVAL_MS", "10000"))
+LIVE_CACHE_TTL_SECONDS = int(os.getenv("LIVE_CACHE_TTL_SECONDS", "8"))
 _LIVE_QUOTE_CACHE = {}
 
 def _to_float(value):
@@ -102,6 +105,52 @@ def _fast_info_get(fast_info, key):
         return fast_info[key]
     except Exception:
         return None
+
+def _fetch_live_quotes_batch(tickers):
+    """Fetch live quotes in one Yahoo request for better serverless reliability."""
+    out = {}
+    valid = sorted({t for t in tickers if isinstance(t, str) and t.strip()})
+    if not valid:
+        return out
+
+    # Keep URL size safe on larger universes.
+    chunk_size = 50
+    for i in range(0, len(valid), chunk_size):
+        chunk = valid[i:i + chunk_size]
+        symbols = ",".join(chunk)
+        url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={url_quote(symbols, safe=',')}"
+        req = Request(url, headers={"User-Agent": "Mozilla/5.0"})
+
+        try:
+            with urlopen(req, timeout=8) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+        except Exception:
+            continue
+
+        rows = (payload.get("quoteResponse") or {}).get("result") or []
+        for item in rows:
+            ticker = item.get("symbol")
+            if not ticker:
+                continue
+            price = _to_float(item.get("regularMarketPrice"))
+            if price is None:
+                continue
+
+            prev_close = _to_float(item.get("regularMarketPreviousClose"))
+            volume = _to_float(item.get("regularMarketVolume"))
+            as_of = _as_utc_timestamp(item.get("regularMarketTime"))
+            chg_pct = None
+            if prev_close and prev_close != 0:
+                chg_pct = ((price / prev_close) - 1) * 100
+
+            out[ticker] = {
+                "price": price,
+                "daily_change_pct": chg_pct,
+                "volume": volume,
+                "as_of": as_of if not pd.isna(as_of) else pd.NaT,
+            }
+
+    return out
 
 def _fetch_single_live_quote(ticker):
     if yf is None:
@@ -156,23 +205,36 @@ def _fetch_single_live_quote(ticker):
 def get_live_quotes(tickers):
     now = time.time()
     live = {}
+    valid_tickers = sorted({t for t in tickers if isinstance(t, str) and t.strip()})
+    to_refresh = []
 
-    for ticker in sorted({t for t in tickers if isinstance(t, str) and t.strip()}):
+    for ticker in valid_tickers:
         cached = _LIVE_QUOTE_CACHE.get(ticker)
         if cached and now - cached["ts"] <= LIVE_CACHE_TTL_SECONDS:
             live[ticker] = cached["quote"]
             continue
+        to_refresh.append(ticker)
 
-        quote = None
-        try:
-            quote = _fetch_single_live_quote(ticker)
-        except Exception:
-            quote = None
+    # Primary path: single batch request (faster and more stable on Vercel).
+    batched = _fetch_live_quotes_batch(to_refresh)
+
+    for ticker in to_refresh:
+        quote = batched.get(ticker)
+
+        # Fallback path: yfinance single ticker call.
+        if quote is None:
+            try:
+                quote = _fetch_single_live_quote(ticker)
+            except Exception:
+                quote = None
 
         if quote is not None:
             _LIVE_QUOTE_CACHE[ticker] = {"ts": now, "quote": quote}
             live[ticker] = quote
-        elif cached:
+            continue
+
+        cached = _LIVE_QUOTE_CACHE.get(ticker)
+        if cached:
             live[ticker] = cached["quote"]
 
     return live
@@ -490,7 +552,7 @@ NAV = [
 # ÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚Â
 app.layout = html.Div([
     dcc.Store(id="active-page", data="overview"),
-    dcc.Interval(id="clock", interval=60000, n_intervals=0),
+    dcc.Interval(id="clock", interval=LIVE_REFRESH_INTERVAL_MS, n_intervals=0),
 
     html.Div(style={
         "display": "flex", "minHeight": "100vh",
@@ -721,7 +783,7 @@ def show_screener_sort_controls(active):
 
 @app.callback(Output("live-time","children"), Input("clock","n_intervals"))
 def update_time(_):
-    return datetime.now().strftime("%d %b %Y | %H:%M IST")
+    return datetime.now(IST).strftime("%d %b %Y | %H:%M IST")
 
 @app.callback(Output("data-meta","children"), Input("clock","n_intervals"))
 def update_meta(_):
@@ -830,14 +892,21 @@ def heatmap_page_month_click(click_data, heatmap_id, start_date, end_date):
     Input("screener-sort-by","value"), Input("screener-sort-order","value"),
     Input("clock","n_intervals"))
 def render(page, tickers, start, end, ctype, scale, screener_sort_by, screener_sort_order, _clock_tick):
+    ctx = callback_context
+    trig = ctx.triggered[0]["prop_id"].split(".")[0] if ctx.triggered else None
+    # Avoid expensive re-renders every 10s on non-live pages.
+    if trig == "clock" and page not in {"overview", "screener"}:
+        return no_update
+
     if not tickers: tickers = DEFAULT_T
     if isinstance(tickers, str): tickers = [tickers]
     s,e = pd.to_datetime(start), pd.to_datetime(end)
     df   = prices[(prices["Ticker"].isin(tickers))&(prices["Date"]>=s)&(prices["Date"]<=e)].copy()
     snap = snapshot[snapshot["Ticker"].isin(tickers)].copy()
-    snap = with_live_quotes(snap)
+    if page == "overview":
+        snap = with_live_quotes(snap)
     if page == "screener":
-        return pg_screener(df, snap, tickers, ctype, scale, screener_sort_by, screener_sort_order)
+        return pg_screener(df, with_live_quotes(snapshot.copy()), tickers, ctype, scale, screener_sort_by, screener_sort_order)
     fns  = {"overview":pg_overview,"price":pg_price,"technicals":pg_technicals,
             "compare":pg_compare,"sector":pg_sector,"risk":pg_risk,
             "heatmap":pg_heatmap}
@@ -1483,7 +1552,7 @@ def pg_risk(df, snap, tickers, ctype, scale):
 #  PAGE 7 ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â SCREENER
 # ÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚Â
 def pg_screener(df, snap, tickers, ctype, scale, sort_by="Ticker", sort_order="asc"):
-    all_s = snapshot.copy()
+    all_s = snap.copy()
     all_s["Close_INR"] = all_s["Close"]
 
     def fmt_cell(col, val):
