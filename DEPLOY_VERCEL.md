@@ -37,6 +37,11 @@ Set these environment variables in Vercel Project Settings -> Environment Variab
 - `LIVE_FETCH_TIMEOUT_SECONDS` (default `4.0`): max wait for live quote fetch batch.
 - `LIVE_MAX_WORKERS` (default `6`): parallel workers for live quote requests.
 - `LIVE_MAX_QUOTE_AGE_MINUTES` (default `20`): if quote timestamp is older than this, it is treated as EOD (not LIVE).
+- `ENABLE_NSE_QUOTES` (default `1`): enable NSE official quote API as first-priority source for `.NS` tickers.
+- `NSE_TIMEOUT_SECONDS` (default `2.5`): timeout for NSE quote API requests.
+- `YAHOO_BATCH_TIMEOUT_SECONDS` (default `2.5`): timeout for Yahoo multi-symbol quote API calls.
+- `YAHOO_QUOTE_BATCH_SIZE` (default `50`): symbols fetched per Yahoo quote API request.
+- `YAHOO_CHART_TIMEOUT_SECONDS` (default `2.5`): timeout for Yahoo 1-minute chart API fallback (used for more exact timestamp/price).
 
 ## Auto-Refresh On Vercel (Recommended)
 

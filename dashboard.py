@@ -7,6 +7,9 @@
 """
 import os, warnings, json, time
 from concurrent.futures import ThreadPoolExecutor, wait
+from urllib.parse import quote
+from urllib.request import Request, urlopen, build_opener, HTTPCookieProcessor
+from http.cookiejar import CookieJar
 warnings.filterwarnings("ignore")
 
 import pandas as pd
@@ -68,14 +71,27 @@ LIVE_REFRESH_INTERVAL_MS = int(os.getenv("LIVE_REFRESH_INTERVAL_MS", "10000"))
 LIVE_FETCH_TIMEOUT_SECONDS = float(os.getenv("LIVE_FETCH_TIMEOUT_SECONDS", "4.0"))
 LIVE_MAX_WORKERS = max(1, int(os.getenv("LIVE_MAX_WORKERS", "6")))
 LIVE_MAX_QUOTE_AGE_MINUTES = int(os.getenv("LIVE_MAX_QUOTE_AGE_MINUTES", "20"))
+YAHOO_BATCH_TIMEOUT_SECONDS = float(os.getenv("YAHOO_BATCH_TIMEOUT_SECONDS", "2.5"))
+YAHOO_QUOTE_BATCH_SIZE = max(1, int(os.getenv("YAHOO_QUOTE_BATCH_SIZE", "50")))
+YAHOO_CHART_TIMEOUT_SECONDS = float(os.getenv("YAHOO_CHART_TIMEOUT_SECONDS", "2.5"))
+ENABLE_NSE_QUOTES = os.getenv("ENABLE_NSE_QUOTES", "1").strip().lower() not in {"0", "false", "no"}
+NSE_TIMEOUT_SECONDS = float(os.getenv("NSE_TIMEOUT_SECONDS", "2.5"))
+NSE_WARMUP_TTL_SECONDS = int(os.getenv("NSE_WARMUP_TTL_SECONDS", "300"))
 _LIVE_QUOTE_CACHE = {}
 _META_REFRESH_CACHE = {"mtime": None, "component": ""}
+_NSE_COOKIE_JAR = CookieJar()
+_NSE_OPENER = build_opener(HTTPCookieProcessor(_NSE_COOKIE_JAR))
+_NSE_LAST_WARMUP = 0.0
 
 def _to_float(value):
     """Best-effort float conversion for external quote fields."""
     try:
         if value is None:
             return None
+        if isinstance(value, str):
+            value = value.strip().replace(",", "")
+            if value in {"", "-", "NA", "N/A", "None", "null"}:
+                return None
         if isinstance(value, float) and np.isnan(value):
             return None
         return float(value)
@@ -96,6 +112,21 @@ def _as_utc_timestamp(value):
                 return pd.to_datetime(v, unit="ms", utc=True, errors="coerce")
             return pd.to_datetime(v, unit="s", utc=True, errors="coerce")
         return pd.to_datetime(value, errors="coerce", utc=True)
+    except Exception:
+        return pd.NaT
+
+def _parse_ist_timestamp(value):
+    if value is None:
+        return pd.NaT
+    try:
+        stamp = pd.to_datetime(value, errors="coerce", dayfirst=True)
+        if pd.isna(stamp):
+            return pd.NaT
+        if stamp.tzinfo is None:
+            stamp = stamp.tz_localize(IST)
+        else:
+            stamp = stamp.tz_convert(IST)
+        return stamp.tz_convert("UTC")
     except Exception:
         return pd.NaT
 
@@ -141,6 +172,256 @@ def _fetch_daily_history(tk):
             return pd.DataFrame()
     except Exception:
         return pd.DataFrame()
+
+def _chunked(values, size):
+    for i in range(0, len(values), size):
+        yield values[i:i + size]
+
+_NSE_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+    "Accept": "application/json,text/plain,*/*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://www.nseindia.com/",
+    "Connection": "keep-alive",
+}
+
+def _nse_symbol_from_ticker(ticker):
+    if not isinstance(ticker, str):
+        return ""
+    return ticker.replace(".NS", "").replace(".BO", "").strip().upper()
+
+def _nse_warmup_session():
+    global _NSE_LAST_WARMUP
+    now = time.time()
+    if now - _NSE_LAST_WARMUP <= NSE_WARMUP_TTL_SECONDS:
+        return
+
+    for url in ("https://www.nseindia.com/", "https://www.nseindia.com/market-data/live-equity-market"):
+        try:
+            req = Request(url, headers=_NSE_HEADERS)
+            with _NSE_OPENER.open(req, timeout=NSE_TIMEOUT_SECONDS) as resp:
+                resp.read(32)
+        except Exception:
+            continue
+    _NSE_LAST_WARMUP = now
+
+def _fetch_nse_live_quote(ticker):
+    if not ENABLE_NSE_QUOTES:
+        return None
+    if not isinstance(ticker, str) or not ticker.endswith(".NS"):
+        return None
+
+    symbol = _nse_symbol_from_ticker(ticker)
+    if not symbol:
+        return None
+
+    _nse_warmup_session()
+    url = f"https://www.nseindia.com/api/quote-equity?symbol={quote(symbol)}"
+    try:
+        req = Request(url, headers=_NSE_HEADERS)
+        with _NSE_OPENER.open(req, timeout=NSE_TIMEOUT_SECONDS) as resp:
+            payload = json.loads(resp.read().decode("utf-8", "ignore"))
+    except Exception:
+        return None
+
+    price_info = payload.get("priceInfo", {}) or {}
+    metadata = payload.get("metadata", {}) or {}
+    security_info = payload.get("securityWiseDP", {}) or {}
+
+    price = _to_float(metadata.get("lastPrice"))
+    if price is None:
+        price = _to_float(price_info.get("lastPrice"))
+    prev_close = _to_float(price_info.get("previousClose"))
+    if prev_close is None:
+        prev_close = _to_float(metadata.get("previousClose"))
+    volume = _to_float(metadata.get("totalTradedVolume"))
+    if volume is None:
+        volume = _to_float(security_info.get("quantityTraded"))
+
+    as_of = _parse_ist_timestamp(metadata.get("lastUpdateTime"))
+    if pd.isna(as_of):
+        as_of = _parse_ist_timestamp(payload.get("lastUpdateTime"))
+    if pd.isna(as_of):
+        as_of = _as_utc_timestamp(metadata.get("lastUpdateTime"))
+
+    if price is None:
+        return None
+
+    chg_pct = None
+    if prev_close and prev_close != 0:
+        chg_pct = ((price / prev_close) - 1) * 100
+
+    return {
+        "price": price,
+        "daily_change_pct": chg_pct,
+        "volume": volume,
+        "as_of": as_of if not pd.isna(as_of) else pd.NaT,
+        "source": "NSE_API",
+        "is_live": _is_recent_quote_timestamp(as_of),
+    }
+
+def _fetch_nse_live_quotes(tickers):
+    if not tickers:
+        return {}
+
+    out = {}
+    workers = min(LIVE_MAX_WORKERS, len(tickers))
+    executor = ThreadPoolExecutor(max_workers=max(1, workers))
+    futures = {executor.submit(_fetch_nse_live_quote, ticker): ticker for ticker in tickers}
+    not_done = set()
+    try:
+        done, not_done = wait(futures, timeout=LIVE_FETCH_TIMEOUT_SECONDS)
+        for future in done:
+            ticker = futures[future]
+            quote = None
+            try:
+                quote = future.result()
+            except Exception:
+                quote = None
+            if quote is not None:
+                out[ticker] = quote
+    finally:
+        for future in not_done:
+            future.cancel()
+        executor.shutdown(wait=False, cancel_futures=True)
+
+    return out
+
+def _fetch_batch_live_quotes(tickers):
+    if not tickers:
+        return {}
+
+    out = {}
+    headers = {"User-Agent": "Mozilla/5.0"}
+
+    for chunk in _chunked(tickers, YAHOO_QUOTE_BATCH_SIZE):
+        symbols = ",".join(chunk)
+        url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={quote(symbols)}"
+        try:
+            req = Request(url, headers=headers)
+            with urlopen(req, timeout=YAHOO_BATCH_TIMEOUT_SECONDS) as resp:
+                payload = json.loads(resp.read().decode("utf-8", "ignore"))
+        except Exception:
+            continue
+
+        rows = payload.get("quoteResponse", {}).get("result", [])
+        for row in rows:
+            ticker = str(row.get("symbol", "")).strip()
+            if not ticker:
+                continue
+
+            price = _to_float(row.get("regularMarketPrice"))
+            prev_close = _to_float(row.get("regularMarketPreviousClose"))
+            volume = _to_float(row.get("regularMarketVolume"))
+            as_of = _as_utc_timestamp(row.get("regularMarketTime"))
+
+            if price is None:
+                continue
+
+            chg_pct = None
+            if prev_close and prev_close != 0:
+                chg_pct = ((price / prev_close) - 1) * 100
+
+            is_live = _is_recent_quote_timestamp(as_of)
+
+            out[ticker] = {
+                "price": price,
+                "daily_change_pct": chg_pct,
+                "volume": volume,
+                "as_of": as_of if not pd.isna(as_of) else pd.NaT,
+                "source": "YAHOO_BATCH",
+                "is_live": is_live,
+            }
+
+    return out
+
+def _fetch_chart_live_quote(ticker):
+    headers = {"User-Agent": "Mozilla/5.0"}
+    url = (
+        f"https://query1.finance.yahoo.com/v8/finance/chart/{quote(ticker, safe='')}"
+        "?range=1d&interval=1m&includePrePost=false&events=div%2Csplits"
+    )
+    try:
+        req = Request(url, headers=headers)
+        with urlopen(req, timeout=YAHOO_CHART_TIMEOUT_SECONDS) as resp:
+            payload = json.loads(resp.read().decode("utf-8", "ignore"))
+    except Exception:
+        return None
+
+    rows = payload.get("chart", {}).get("result", [])
+    if not rows:
+        return None
+
+    row = rows[0]
+    meta = row.get("meta", {}) or {}
+    timestamps = row.get("timestamp") or []
+    quote_rows = (row.get("indicators", {}) or {}).get("quote") or [{}]
+    quote_row = quote_rows[0] if quote_rows else {}
+    closes = quote_row.get("close") or []
+    volumes = quote_row.get("volume") or []
+
+    price = _to_float(meta.get("regularMarketPrice"))
+    as_of = _as_utc_timestamp(meta.get("regularMarketTime"))
+    volume = _to_float(meta.get("regularMarketVolume"))
+
+    limit = min(len(timestamps), len(closes))
+    for i in range(limit - 1, -1, -1):
+        close_val = _to_float(closes[i])
+        if close_val is None:
+            continue
+        price = close_val
+        as_of = _as_utc_timestamp(timestamps[i])
+        if i < len(volumes):
+            volume = _to_float(volumes[i])
+        break
+
+    if price is None:
+        return None
+
+    prev_close = (
+        _to_float(meta.get("chartPreviousClose"))
+        or _to_float(meta.get("previousClose"))
+        or _to_float(meta.get("regularMarketPreviousClose"))
+    )
+    chg_pct = None
+    if prev_close and prev_close != 0:
+        chg_pct = ((price / prev_close) - 1) * 100
+
+    return {
+        "price": price,
+        "daily_change_pct": chg_pct,
+        "volume": volume,
+        "as_of": as_of if not pd.isna(as_of) else pd.NaT,
+        "source": "YAHOO_CHART",
+        "is_live": _is_recent_quote_timestamp(as_of),
+    }
+
+def _fetch_chart_live_quotes(tickers):
+    if not tickers:
+        return {}
+
+    out = {}
+    workers = min(LIVE_MAX_WORKERS, len(tickers))
+    executor = ThreadPoolExecutor(max_workers=max(1, workers))
+    futures = {executor.submit(_fetch_chart_live_quote, ticker): ticker for ticker in tickers}
+    not_done = set()
+    try:
+        done, not_done = wait(futures, timeout=LIVE_FETCH_TIMEOUT_SECONDS)
+        for future in done:
+            ticker = futures[future]
+            quote = None
+            try:
+                quote = future.result()
+            except Exception:
+                quote = None
+            if quote is not None:
+                out[ticker] = quote
+    finally:
+        for future in not_done:
+            future.cancel()
+        executor.shutdown(wait=False, cancel_futures=True)
+
+    return out
 
 def _fetch_single_live_quote(ticker):
     if yf is None:
@@ -234,16 +515,64 @@ def get_live_quotes(tickers):
     if not stale_tickers:
         return live
 
+    # Highest-priority source for NSE symbols.
+    if ENABLE_NSE_QUOTES:
+        nse_tickers = [t for t in stale_tickers if isinstance(t, str) and t.endswith(".NS")]
+        nse_quotes = _fetch_nse_live_quotes(nse_tickers)
+        for ticker, quote in nse_quotes.items():
+            _LIVE_QUOTE_CACHE[ticker] = {"ts": now, "quote": quote}
+            live[ticker] = quote
+
+    stale_after_nse = [t for t in stale_tickers if t not in live]
+    if not stale_after_nse:
+        return live
+
+    # Fast path: fetch multiple symbols in one Yahoo quote API call.
+    batch_quotes = _fetch_batch_live_quotes(stale_after_nse)
+    for ticker, quote in batch_quotes.items():
+        _LIVE_QUOTE_CACHE[ticker] = {"ts": now, "quote": quote}
+        live[ticker] = quote
+
+    # Accuracy path: fetch 1-minute chart candles to improve quote timestamp precision.
+    chart_candidates = [t for t in stale_after_nse if t not in batch_quotes]
+    for ticker, quote in batch_quotes.items():
+        stamp = _as_utc_timestamp(quote.get("as_of"))
+        stamp_ist = stamp.tz_convert(IST) if not pd.isna(stamp) else pd.NaT
+        suspicious_midnight = not pd.isna(stamp_ist) and stamp_ist.hour == 0 and stamp_ist.minute == 0
+        if pd.isna(stamp) or suspicious_midnight:
+            chart_candidates.append(ticker)
+
+    chart_quotes = _fetch_chart_live_quotes(sorted(set(chart_candidates)))
+    for ticker, quote in chart_quotes.items():
+        cached_quote = live.get(ticker)
+        cached_stamp = _as_utc_timestamp(cached_quote.get("as_of")) if cached_quote else pd.NaT
+        new_stamp = _as_utc_timestamp(quote.get("as_of"))
+        should_replace = cached_quote is None
+        if not should_replace:
+            if pd.isna(cached_stamp):
+                should_replace = True
+            elif not pd.isna(new_stamp) and new_stamp >= cached_stamp:
+                should_replace = True
+            elif bool(quote.get("is_live")) and not bool(cached_quote.get("is_live")):
+                should_replace = True
+        if should_replace:
+            _LIVE_QUOTE_CACHE[ticker] = {"ts": now, "quote": quote}
+            live[ticker] = quote
+
+    remaining_tickers = [t for t in stale_after_nse if t not in live]
+    if not remaining_tickers:
+        return live
+
     if yf is None:
-        for ticker in stale_tickers:
+        for ticker in remaining_tickers:
             cached = _LIVE_QUOTE_CACHE.get(ticker)
             if cached:
                 live[ticker] = cached["quote"]
         return live
 
-    workers = min(LIVE_MAX_WORKERS, len(stale_tickers))
+    workers = min(LIVE_MAX_WORKERS, len(remaining_tickers))
     executor = ThreadPoolExecutor(max_workers=max(1, workers))
-    futures = {executor.submit(_fetch_single_live_quote, ticker): ticker for ticker in stale_tickers}
+    futures = {executor.submit(_fetch_single_live_quote, ticker): ticker for ticker in remaining_tickers}
     not_done = set()
     try:
         done, not_done = wait(futures, timeout=LIVE_FETCH_TIMEOUT_SECONDS)
@@ -294,12 +623,25 @@ def with_live_quotes(snap_df):
         quote_price = _to_float(quote.get("price"))
         if quote_price is None:
             continue
+
+        quote_as_of = _as_utc_timestamp(quote.get("as_of"))
+        snapshot_date = pd.to_datetime(row.get("Date"), errors="coerce")
+        snapshot_day = snapshot_date.date() if not pd.isna(snapshot_date) else None
+        quote_day = quote_as_of.tz_convert(IST).date() if not pd.isna(quote_as_of) else None
+
+        is_live = bool(quote.get("is_live"))
+        source = str(quote.get("source", "")).upper()
+        supports_latest_override = source not in {"DAILY_FALLBACK", "UNKNOWN"}
+        is_newer_than_snapshot = quote_day is not None and (snapshot_day is None or quote_day > snapshot_day)
+        if not (is_live or (is_newer_than_snapshot and supports_latest_override)):
+            continue
+
         out.at[idx, "Close"] = quote_price
         if quote.get("daily_change_pct") is not None:
             out.at[idx, "Daily_Return_%"] = quote["daily_change_pct"]
-        out.at[idx, "Price_Source"] = "LIVE" if bool(quote.get("is_live")) else "EOD"
-        if quote.get("as_of") is not None and not pd.isna(_as_utc_timestamp(quote.get("as_of"))):
-            out.at[idx, "Price_As_Of"] = quote.get("as_of")
+        out.at[idx, "Price_Source"] = "LIVE" if is_live else "LATEST"
+        if not pd.isna(quote_as_of):
+            out.at[idx, "Price_As_Of"] = quote_as_of
 
     return out
 
@@ -939,17 +1281,87 @@ def heatmap_page_month_click(click_data, heatmap_id, start_date, end_date):
     table_fig = build_month_daily_table_figure(sub, ticker, year, month)
     return wave_fig, wave_caption, table_fig
 
+def build_overview_kpis(snap):
+    if snap.empty:
+        return []
+
+    kpis = []
+    for _, row in snap.iterrows():
+        chg = row.get("Daily_Return_%", 0) or 0
+        y1 = row.get("Return_1Y_%", 0) or 0
+        rsi = row.get("RSI_14", 50) or 50
+        price = row.get("Close", 0) or 0
+        price_source = str(row.get("Price_Source", "EOD")).upper()
+        price_as_of = row.get("Price_As_Of", row.get("Date"))
+        up = chg >= 0
+        rsi_c = RED if rsi > 70 else (GREEN if rsi < 30 else AMBER)
+
+        if price_source == "LIVE":
+            price_stamp = f"LIVE | {fmt_quote_timestamp(price_as_of)}"
+        elif price_source == "LATEST":
+            price_stamp = f"LATEST | {fmt_quote_timestamp(price_as_of)}"
+        else:
+            eod_date = pd.to_datetime(price_as_of, errors="coerce")
+            if pd.isna(eod_date):
+                eod_date = pd.to_datetime(row.get("Date"), errors="coerce")
+            eod_label = eod_date.strftime("%d %b %Y") if not pd.isna(eod_date) else "Date unavailable"
+            price_stamp = f"EOD CLOSE | {eod_label}"
+
+        kpis.append(html.Div([
+            html.Div(style={
+                "position":"absolute","top":"0","left":"0","right":"0","height":"2px",
+                "background": f"linear-gradient(90deg,transparent,{GREEN if up else RED},transparent)",
+            }),
+            html.Div(style={"display":"flex","justifyContent":"space-between","alignItems":"flex-start","marginBottom":"12px"}, children=[
+                html.Div([
+                    html.Div(row["Ticker"], style={"fontSize":"15px","fontWeight":"800","color":TEXT,"letterSpacing":"1px"}),
+                    html.Div(row.get("Company","")[:18] if pd.notna(row.get("Company","")) else "", style={"fontSize":"10px","color":TEXT3,"marginTop":"2px"}),
+                ]),
+                html.Div(f"{row.get('Sector','')[:10]}", style={
+                    "fontSize":"9px","color":GOLD,"background":f"{GOLD}12",
+                    "border":f"1px solid {GOLD}30","borderRadius":"5px",
+                    "padding":"3px 7px","letterSpacing":"0.5px",
+                }),
+            ]),
+            html.Div(fmt_inr(price), style={
+                "fontSize":"26px","fontWeight":"700","color":TEXT,
+                "fontFamily":"'DM Mono',monospace","letterSpacing":"-0.5px","marginBottom":"8px",
+            }),
+            html.Div(style={"display":"flex","gap":"8px","alignItems":"center","marginBottom":"12px"}, children=[
+                html.Div(f"{'UP' if up else 'DOWN'} {abs(chg):.2f}%", style={
+                    "fontSize":"12px","fontWeight":"600",
+                    "color": GREEN if up else RED,
+                    "background": f"{GREEN}15" if up else f"{RED}15",
+                    "border": f"1px solid {GREEN}30" if up else f"1px solid {RED}30",
+                    "borderRadius":"6px","padding":"3px 10px",
+                }),
+                html.Div(f"1Y: {y1:+.1f}%", style={"fontSize":"11px","color":GREEN if y1>=0 else RED}),
+            ]),
+            html.Div(style={"display":"grid","gridTemplateColumns":"1fr 1fr","gap":"8px","fontSize":"10px"}, children=[
+                html.Div([html.Span("RSI  ",style={"color":TEXT3}), html.Span(f"{rsi:.0f}",style={"color":rsi_c,"fontWeight":"700","fontFamily":"'DM Mono',monospace"})]),
+                html.Div([html.Span("Vol  ",style={"color":TEXT3}), html.Span(f"{row.get('Volatility_1M_%',0) or 0:.1f}%",style={"color":AMBER,"fontFamily":"'DM Mono',monospace"})]),
+            ]),
+            html.Div(price_stamp, style={
+                "marginTop":"10px","fontSize":"9px","letterSpacing":"0.4px",
+                "color": GREEN if price_source == "LIVE" else (TEAL if price_source == "LATEST" else TEXT3),
+                "fontFamily":"'DM Mono',monospace",
+            }),
+        ], style={
+            "background": f"linear-gradient(135deg,{BG3} 0%,{BG2} 100%)",
+            "border": f"1px solid {BORDER}",
+            "borderRadius": "16px", "padding": "18px",
+            "flex":"1","minWidth":"180px","position":"relative","overflow":"hidden",
+            "transition":"transform 0.2s,box-shadow 0.2s",
+        }))
+
+    return kpis
+
 @app.callback(Output("page-content","children"),
     Input("active-page","data"), Input("g-tickers","value"),
     Input("g-dates","start_date"), Input("g-dates","end_date"),
     Input("g-ctype","value"), Input("g-scale","value"),
-    Input("screener-sort-by","value"), Input("screener-sort-order","value"),
-    Input("live-refresh","n_intervals"))
-def render(page, tickers, start, end, ctype, scale, screener_sort_by, screener_sort_order, _live_tick):
-    trigger = callback_context.triggered[0]["prop_id"].split(".")[0] if callback_context.triggered else None
-    if trigger == "live-refresh" and page != "overview":
-        return no_update
-
+    Input("screener-sort-by","value"), Input("screener-sort-order","value"))
+def render(page, tickers, start, end, ctype, scale, screener_sort_by, screener_sort_order):
     if not tickers: tickers = DEFAULT_T
     if isinstance(tickers, str): tickers = [tickers]
     s,e = pd.to_datetime(start), pd.to_datetime(end)
@@ -963,6 +1375,29 @@ def render(page, tickers, start, end, ctype, scale, screener_sort_by, screener_s
             "compare":pg_compare,"sector":pg_sector,"risk":pg_risk,
             "heatmap":pg_heatmap}
     return fns.get(page, pg_overview)(df, snap, tickers, ctype, scale)
+
+@app.callback(
+    Output("overview-kpi-cards", "children"),
+    Input("live-refresh", "n_intervals"),
+    State("active-page", "data"),
+    State("g-tickers", "value"),
+    prevent_initial_call=True
+)
+def refresh_overview_kpis(_, page, tickers):
+    if page != "overview":
+        return no_update
+
+    if not tickers:
+        tickers = DEFAULT_T
+    if isinstance(tickers, str):
+        tickers = [tickers]
+
+    snap = snapshot[snapshot["Ticker"].isin(tickers)].copy()
+    if snap.empty:
+        return []
+
+    snap = with_live_quotes(snap)
+    return build_overview_kpis(snap)
 
 
 # ÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚Â
@@ -984,6 +1419,8 @@ def pg_overview(df, snap, tickers, ctype, scale):
 
         if price_source == "LIVE":
             price_stamp = f"LIVE | {fmt_quote_timestamp(price_as_of)}"
+        elif price_source == "LATEST":
+            price_stamp = f"LATEST | {fmt_quote_timestamp(price_as_of)}"
         else:
             eod_date = pd.to_datetime(price_as_of, errors="coerce")
             if pd.isna(eod_date):
@@ -1028,7 +1465,7 @@ def pg_overview(df, snap, tickers, ctype, scale):
             ]),
             html.Div(price_stamp, style={
                 "marginTop":"10px","fontSize":"9px","letterSpacing":"0.4px",
-                "color": GREEN if price_source == "LIVE" else TEXT3,
+                "color": GREEN if price_source == "LIVE" else (TEAL if price_source == "LATEST" else TEXT3),
                 "fontFamily":"'DM Mono',monospace",
             }),
         ], style={
@@ -1104,7 +1541,7 @@ def pg_overview(df, snap, tickers, ctype, scale):
         ])
 
     return html.Div([
-        html.Div(kpis,style={"display":"flex","gap":"14px","flexWrap":"wrap","marginBottom":"20px"}),
+        html.Div(kpis,id="overview-kpi-cards",style={"display":"flex","gap":"14px","flexWrap":"wrap","marginBottom":"20px"}),
         card([
             section_title("Price History", f"INR | {ctype.capitalize()} Chart"),
             G(pf),
