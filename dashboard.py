@@ -322,6 +322,23 @@ def ticker_opts():
 MONTH_LABELS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
 MONTH_NAME_TO_NUM = {m: i + 1 for i, m in enumerate(MONTH_LABELS)}
 MONTH_NUM_TO_NAME = {i + 1: m for i, m in enumerate(MONTH_LABELS)}
+SCREENER_SORT_OPTIONS = [
+    {"label":"Ticker", "value":"Ticker"},
+    {"label":"Company", "value":"Company"},
+    {"label":"Sector", "value":"Sector"},
+    {"label":"Price (INR)", "value":"Close_INR"},
+    {"label":"Day %", "value":"Daily_Return_%"},
+    {"label":"1M %", "value":"Return_1M_%"},
+    {"label":"1Y %", "value":"Return_1Y_%"},
+    {"label":"RSI", "value":"RSI_14"},
+    {"label":"Vol%", "value":"Volatility_1M_%"},
+    {"label":"BB Pos", "value":"BB_Position"},
+    {"label":">SMA200", "value":"Above_SMA200"},
+]
+SCREENER_SORT_ORDER_OPTIONS = [
+    {"label":"Ascending", "value":"asc"},
+    {"label":"Descending", "value":"desc"},
+]
 
 def hex_to_rgba(hex_color, alpha=0.15):
     h = str(hex_color).lstrip("#")
@@ -625,6 +642,36 @@ app.layout = html.Div([
                     *[html.Button(p, id=f"btn-{p}", n_clicks=0, className="period-btn")
                       for p in ["1W","1M","3M","6M","1Y","3Y","5Y","10Y","MAX"]],
                 ]),
+                html.Div(id="screener-sort-controls", style={"display":"none"}, children=[
+                    html.Div(style={
+                        "display":"grid",
+                        "gridTemplateColumns":"1fr 1fr",
+                        "gap":"16px",
+                        "marginTop":"12px",
+                        "alignItems":"end",
+                    }, children=[
+                        html.Div([
+                            lbl("Screener Sort By"),
+                            dcc.Dropdown(
+                                id="screener-sort-by",
+                                options=SCREENER_SORT_OPTIONS,
+                                value="Ticker",
+                                clearable=False,
+                                className="ctrl-dd",
+                            ),
+                        ]),
+                        html.Div([
+                            lbl("Screener Sort Order"),
+                            dcc.Dropdown(
+                                id="screener-sort-order",
+                                options=SCREENER_SORT_ORDER_OPTIONS,
+                                value="asc",
+                                clearable=False,
+                                className="ctrl-dd",
+                            ),
+                        ]),
+                    ]),
+                ]),
             ]),
 
             # Page content
@@ -665,6 +712,12 @@ def page_title(active):
     for p,_,name,icon in NAV:
         if p == active: return f"{icon}  {name}"
     return ""
+
+@app.callback(Output("screener-sort-controls","style"), Input("active-page","data"))
+def show_screener_sort_controls(active):
+    if active == "screener":
+        return {"display":"block"}
+    return {"display":"none"}
 
 @app.callback(Output("live-time","children"), Input("clock","n_intervals"))
 def update_time(_):
@@ -774,17 +827,20 @@ def heatmap_page_month_click(click_data, heatmap_id, start_date, end_date):
     Input("active-page","data"), Input("g-tickers","value"),
     Input("g-dates","start_date"), Input("g-dates","end_date"),
     Input("g-ctype","value"), Input("g-scale","value"),
+    Input("screener-sort-by","value"), Input("screener-sort-order","value"),
     Input("clock","n_intervals"))
-def render(page, tickers, start, end, ctype, scale, _clock_tick):
+def render(page, tickers, start, end, ctype, scale, screener_sort_by, screener_sort_order, _clock_tick):
     if not tickers: tickers = DEFAULT_T
     if isinstance(tickers, str): tickers = [tickers]
     s,e = pd.to_datetime(start), pd.to_datetime(end)
     df   = prices[(prices["Ticker"].isin(tickers))&(prices["Date"]>=s)&(prices["Date"]<=e)].copy()
     snap = snapshot[snapshot["Ticker"].isin(tickers)].copy()
     snap = with_live_quotes(snap)
+    if page == "screener":
+        return pg_screener(df, snap, tickers, ctype, scale, screener_sort_by, screener_sort_order)
     fns  = {"overview":pg_overview,"price":pg_price,"technicals":pg_technicals,
             "compare":pg_compare,"sector":pg_sector,"risk":pg_risk,
-            "screener":pg_screener,"heatmap":pg_heatmap}
+            "heatmap":pg_heatmap}
     return fns.get(page, pg_overview)(df, snap, tickers, ctype, scale)
 
 
@@ -1426,7 +1482,7 @@ def pg_risk(df, snap, tickers, ctype, scale):
 # ÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚Â
 #  PAGE 7 ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â SCREENER
 # ÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚ÂÃƒÂ¢Ã¢â‚¬Â¢Ã‚Â
-def pg_screener(df, snap, tickers, ctype, scale):
+def pg_screener(df, snap, tickers, ctype, scale, sort_by="Ticker", sort_order="asc"):
     all_s = snapshot.copy()
     all_s["Close_INR"] = all_s["Close"]
 
@@ -1447,7 +1503,27 @@ def pg_screener(df, snap, tickers, ctype, scale):
             "Return_1Y_%":"1Y %","RSI_14":"RSI","Volatility_1M_%":"Vol%",
             "BB_Position":"BB Pos","Above_SMA200":">SMA200"}
 
-    rows = all_s[disp_cols]
+    rows = all_s[disp_cols].copy()
+    if disp_cols:
+        if sort_by not in rows.columns:
+            sort_by = "Ticker" if "Ticker" in rows.columns else disp_cols[0]
+        ascending = str(sort_order).lower() != "desc"
+        if pd.api.types.is_numeric_dtype(rows[sort_by]):
+            rows = rows.sort_values(sort_by, ascending=ascending, na_position="last", kind="mergesort")
+        else:
+            rows = rows.sort_values(
+                sort_by,
+                ascending=ascending,
+                na_position="last",
+                kind="mergesort",
+                key=lambda s: s.fillna("").astype(str).str.lower(),
+            )
+    else:
+        sort_by = "Ticker"
+        ascending = True
+
+    sort_label = next((o["label"] for o in SCREENER_SORT_OPTIONS if o["value"] == sort_by), sort_by)
+    sort_dir_label = "Ascending" if ascending else "Descending"
     cell_vals = [[fmt_cell(c, v) for v in rows[c]] for c in disp_cols]
 
     def ccol(col, vals):
@@ -1484,7 +1560,7 @@ def pg_screener(df, snap, tickers, ctype, scale):
     rf.update_layout(**gl(height=280,title="",yaxis=dict(gridcolor=DIM,color=TEXT3,range=[0,100])))
 
     return html.Div([
-        card([html.Div(f"Stock Screener - {len(rows)} Stocks",style={"fontSize":"14px","fontWeight":"600","color":TEXT,"marginBottom":"10px"}),G(tf)]),
+        card([html.Div(f"Stock Screener - {len(rows)} Stocks | {sort_label} ({sort_dir_label})",style={"fontSize":"14px","fontWeight":"600","color":TEXT,"marginBottom":"10px"}),G(tf)]),
         card([html.Div("RSI Signal Overview",style={"fontSize":"14px","fontWeight":"600","color":TEXT,"marginBottom":"10px"}),G(rf)]),
     ])
 

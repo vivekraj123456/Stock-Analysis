@@ -26,3 +26,17 @@ After deploy finishes, open the Vercel URL and confirm the dashboard loads.
 - The app reads CSV files from `powerbi_data/` at runtime. Keep this folder in the repo.
 - Current dataset size is about 50 MB, which can increase cold start time on serverless.
 - If build fails due missing package, add it to `requirements.txt` and redeploy.
+
+## Auto-Refresh On Vercel (Recommended)
+
+Vercel does not automatically see CSV updates from your local machine. It only serves what was in Git at deploy time.
+
+This repo now includes:
+
+- `.github/workflows/refresh-data.yml`
+- A weekday schedule at **08:00 IST** (02:30 UTC)
+- Automatic `powerbi_data/*.csv` refresh + commit + push
+
+Because Vercel is linked to GitHub, each pushed data refresh triggers a new deployment, so production shows the latest dataset date.
+
+If your default branch is protected, allow GitHub Actions to push (or use a PAT-based push action).

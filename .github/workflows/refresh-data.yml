@@ -1,0 +1,45 @@
+name: Refresh Stock Data
+
+on:
+  schedule:
+    # 08:00 IST (02:30 UTC), Monday-Friday
+    - cron: "30 2 * * 1-5"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt ta openpyxl schedule
+
+      - name: Refresh dataset
+        run: python fetch_clean_stocks.py
+
+      - name: Commit and push if data changed
+        run: |
+          git add powerbi_data/*.csv
+          if git diff --cached --quiet; then
+            echo "No CSV changes to commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "chore(data): refresh stock dataset"
+          git push
