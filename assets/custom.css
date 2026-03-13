@@ -491,3 +491,53 @@ body {
 #g-dates svg {
     fill: #111827 !important;
 }
+
+/* Screener dropdown readability (Vercel-safe) */
+#screener-sort-by .Select *,
+#screener-sort-order .Select *,
+#screener-sort-by .Select-value-label,
+#screener-sort-order .Select-value-label,
+#screener-sort-by .Select__single-value,
+#screener-sort-order .Select__single-value,
+#screener-sort-by .Select-placeholder,
+#screener-sort-order .Select-placeholder,
+#screener-sort-by .Select__placeholder,
+#screener-sort-order .Select__placeholder {
+    color: #111827 !important;
+    opacity: 1 !important;
+}
+
+#screener-sort-by .Select-control,
+#screener-sort-order .Select-control {
+    background: #ffffff !important;
+    border: 2px solid #0ea5a5 !important;
+    border-radius: 8px !important;
+}
+
+#screener-sort-by .Select-arrow-zone .Select-arrow,
+#screener-sort-order .Select-arrow-zone .Select-arrow {
+    border-top-color: #111827 !important;
+}
+
+/* Dash react-select v1/virtualized option classes */
+.Select-menu-outer .VirtualizedSelectOption,
+.Select-menu-outer .Select-option,
+.Select-menu .Select-option {
+    background: #ffffff !important;
+    color: #111827 !important;
+    opacity: 1 !important;
+}
+
+.Select-menu-outer .VirtualizedSelectFocusedOption,
+.Select-menu-outer .Select-option.is-focused,
+.Select-menu-outer .Select-option:hover {
+    background: #ecfeff !important;
+    color: #111827 !important;
+}
+
+.Select-menu-outer .VirtualizedSelectSelectedOption,
+.Select-menu-outer .Select-option.is-selected {
+    background: #cffafe !important;
+    color: #111827 !important;
+    font-weight: 700 !important;
+}
