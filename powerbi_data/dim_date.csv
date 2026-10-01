@@ -9768,3 +9768,5 @@ Date,Year,Quarter,Month_Num,Month_Name,Month_Short,Week,Day_Name,Day_Num,Is_Week
 2026-09-27,2026,Q3,9,September,Sep,39,Sunday,27,1,0,2026-09,2026Q3,2020s
 2026-09-28,2026,Q3,9,September,Sep,40,Monday,28,0,1,2026-09,2026Q3,2020s
 2026-09-29,2026,Q3,9,September,Sep,40,Tuesday,29,0,1,2026-09,2026Q3,2020s
+2026-09-30,2026,Q3,9,September,Sep,40,Wednesday,30,0,1,2026-09,2026Q3,2020s
+2026-10-01,2026,Q4,10,October,Oct,40,Thursday,1,0,1,2026-10,2026Q4,2020s
